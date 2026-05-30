@@ -498,6 +498,16 @@
           <button onclick="openAddKidModal()">+ Add First Kid</button>
         </div>
       </div>
+      <!-- Friend Management (Parent-Approved) -->
+      <div class="activity-section" id="friends-management" style="display:none;">
+        <div class="section-header">
+          <h2>👥 Friend Requests</h2>
+        </div>
+        <p style="font-size:13px; color:var(--text-dim); margin-bottom:16px; font-weight:500;">Your approval is required before your kids can connect with friends. This keeps them safe.</p>
+        <div id="parent-friend-requests" style="display:flex; flex-direction:column; gap:10px;">
+          <!-- Populated by JS -->
+        </div>
+      </div>
 
       <!-- Activity Feed -->
       <div class="activity-section">
@@ -515,6 +525,16 @@
 
       <!-- Footer -->
       <div class="footer">
+        <div style="display:flex; gap:12px; justify-content:center; margin-bottom:20px; flex-wrap:wrap;">
+          <a href="https://chronoverse.tlid.io" style="text-decoration:none; background:var(--accent-solid); border:1px solid rgba(34,211,238,0.2); border-radius:12px; padding:10px 20px; display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">🌀</span>
+            <span style="color:var(--accent); font-size:13px; font-weight:800;">Main Hub</span>
+          </a>
+          <a href="https://darkwave.tlid.io" style="text-decoration:none; background:rgba(168,85,247,0.1); border:1px solid rgba(168,85,247,0.2); border-radius:12px; padding:10px 20px; display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">🌊</span>
+            <span style="color:var(--purple); font-size:13px; font-weight:800;">DarkWave Studios</span>
+          </a>
+        </div>
         <p>Made with ❤️ in Gladeville, TN, USA 🇺🇸</p>
         <p>Made with <span class="lume">Lume</span> • DarkWave Studios</p>
       </div>
@@ -688,6 +708,8 @@
       renderKidCards();
       // Check for weekly progress notification
       setTimeout(() => checkWeeklyProgress(), 2000);
+      // Load friend requests for parent approval
+      setTimeout(() => loadParentFriendRequests(), 1500);
     }
 
     // ── Render Kid Cards ──
@@ -874,6 +896,98 @@
       if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
       if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
       return Math.floor(seconds / 86400) + 'd ago';
+    }
+
+    // ── Parent Friend Request Management ──
+    async function loadParentFriendRequests() {
+      const kids = parentData?.kids || [];
+      if (kids.length === 0) return;
+      
+      const container = document.getElementById('parent-friend-requests');
+      const section = document.getElementById('friends-management');
+      let allRequests = [];
+      
+      for (const username of kids) {
+        try {
+          const doc = await db.collection('kids').doc(username).get();
+          if (!doc.exists) continue;
+          const data = doc.data();
+          const requests = data.friendRequests || [];
+          const friends = data.friends || [];
+          
+          requests.forEach(r => allRequests.push({ kid: username, from: r }));
+          
+          // Also show current friends
+          if (friends.length > 0) {
+            allRequests.push({ kid: username, friends: friends });
+          }
+        } catch(e) {}
+      }
+      
+      if (allRequests.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+      
+      section.style.display = 'block';
+      let html = '';
+      
+      // Pending requests
+      const pending = allRequests.filter(r => r.from);
+      if (pending.length > 0) {
+        pending.forEach(req => {
+          html += `
+            <div style="background:var(--bg-card); border:1px solid rgba(244,63,94,0.2); border-radius:var(--radius-sm); padding:14px; display:flex; align-items:center; gap:12px;">
+              <div style="flex:1;">
+                <div style="font-size:14px; font-weight:800; color:var(--text-bright);">${req.from} → ${req.kid}</div>
+                <div style="font-size:12px; color:var(--text-dim); font-weight:600;">wants to be friends with ${req.kid}</div>
+              </div>
+              <button onclick="parentApproveFriend('${req.kid}','${req.from}')" style="background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); border-radius:8px; padding:8px 14px; color:var(--success); font-size:12px; font-weight:800; cursor:pointer;">✓ Approve</button>
+              <button onclick="parentDenyFriend('${req.kid}','${req.from}')" style="background:rgba(244,63,94,0.1); border:1px solid rgba(244,63,94,0.2); border-radius:8px; padding:8px 14px; color:var(--danger); font-size:12px; font-weight:800; cursor:pointer;">✗ Deny</button>
+            </div>
+          `;
+        });
+      }
+      
+      // Current friends summary
+      const friendSummaries = allRequests.filter(r => r.friends);
+      if (friendSummaries.length > 0) {
+        friendSummaries.forEach(item => {
+          html += `
+            <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px;">
+              <div style="font-size:13px; font-weight:700; color:var(--text-dim); margin-bottom:6px;">${item.kid}'s friends:</div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${item.friends.map(f => `<span style="background:var(--accent-solid); border-radius:20px; padding:4px 12px; font-size:12px; font-weight:700; color:var(--accent);">${f}</span>`).join('')}
+              </div>
+            </div>
+          `;
+        });
+      }
+      
+      container.innerHTML = html;
+    }
+
+    async function parentApproveFriend(kidUsername, friendUsername) {
+      const FV = firebase.firestore.FieldValue;
+      try {
+        await db.collection('kids').doc(kidUsername).set({
+          friends: FV.arrayUnion(friendUsername),
+          friendRequests: FV.arrayRemove(friendUsername),
+        }, { merge: true });
+        await db.collection('kids').doc(friendUsername).set({
+          friends: FV.arrayUnion(kidUsername),
+        }, { merge: true });
+        loadParentFriendRequests();
+      } catch(e) { alert('Error approving friend: ' + e.message); }
+    }
+
+    async function parentDenyFriend(kidUsername, friendUsername) {
+      try {
+        await db.collection('kids').doc(kidUsername).set({
+          friendRequests: firebase.firestore.FieldValue.arrayRemove(friendUsername),
+        }, { merge: true });
+        loadParentFriendRequests();
+      } catch(e) { alert('Error denying friend: ' + e.message); }
     }
 
     // Enter key support
