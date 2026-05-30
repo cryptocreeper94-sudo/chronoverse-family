@@ -1,0 +1,5 @@
+/// ─── CHRONOVERSE FAMILY PORTAL BOOT SEQUENCE ────────────────────────────
+/// Entry point — initializes the application
+
+buildShell()
+console.log('[CHRONOVERSE FAMILY PORTAL] Lume application mounted')

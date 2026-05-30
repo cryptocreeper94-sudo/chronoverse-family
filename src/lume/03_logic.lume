@@ -1,0 +1,427 @@
+/// ─── CHRONOVERSE FAMILY PORTAL APPLICATION LOGIC ────────────────────────
+/// Deterministic runtime handlers
+
+// ── Firebase Init ──
+    const firebaseConfig = {
+      apiKey: "AIzaSyC_OAIYUpdIeEz4FlEXBpYZ5U9KaA6l360",
+      authDomain: "darkwave-auth.firebaseapp.com",
+      projectId: "darkwave-auth",
+      storageBucket: "darkwave-auth.firebasestorage.app",
+      messagingSenderId: "41307406912",
+      appId: "1:41307406912:web:b82a15c90790542e2a55a5",
+    };
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    let currentUser = null;
+    let parentData = null;
+
+    // ── Auth State ──
+    auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        currentUser = user;
+        document.getElementById('auth-screen').classList.add('hidden');
+        document.getElementById('dashboard').classList.add('active');
+        await loadParentDashboard();
+      } else {
+        currentUser = null;
+        document.getElementById('auth-screen').classList.remove('hidden');
+        document.getElementById('dashboard').classList.remove('active');
+      }
+    });
+
+    // ── Auth Tab Switch ──
+    function switchAuthTab(tab) {
+      document.querySelectorAll('.auth-tab').forEach((t, i) => {
+        t.classList.toggle('active', (tab === 'login' ? i === 0 : i === 1));
+      });
+      document.getElementById('login-form').style.display = tab === 'login' ? 'block' : 'none';
+      document.getElementById('signup-form').style.display = tab === 'signup' ? 'block' : 'none';
+      document.getElementById('auth-error').style.display = 'none';
+    }
+
+    function showAuthError(msg) {
+      const el = document.getElementById('auth-error');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+
+    // ── Login ──
+    async function handleLogin() {
+      const email = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-password').value;
+      if (!email || !password) return showAuthError('Please fill in all fields.');
+      try {
+        await auth.signInWithEmailAndPassword(email, password);
+      } catch (e) {
+        showAuthError(e.message.replace('Firebase: ', '').replace(/\(auth\/.*\)/, ''));
+      }
+    }
+
+    // ── Signup ──
+    async function handleSignup() {
+      const name = document.getElementById('signup-name').value.trim();
+      const email = document.getElementById('signup-email').value.trim();
+      const password = document.getElementById('signup-password').value;
+      if (!name || !email || !password) return showAuthError('Please fill in all fields.');
+      if (password.length < 6) return showAuthError('Password must be at least 6 characters.');
+      try {
+        const cred = await auth.createUserWithEmailAndPassword(email, password);
+        await cred.user.updateProfile({ displayName: name });
+        // Create parent doc in Firestore
+        await db.collection('parents').doc(cred.user.uid).set({
+          displayName: name,
+          email: email,
+          kids: [],
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        showAuthError(e.message.replace('Firebase: ', '').replace(/\(auth\/.*\)/, ''));
+      }
+    }
+
+    // ── Google Auth ──
+    async function handleGoogleAuth() {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      try {
+        const result = await auth.signInWithPopup(provider);
+        // Check if parent doc exists, create if not
+        const doc = await db.collection('parents').doc(result.user.uid).get();
+        if (!doc.exists) {
+          await db.collection('parents').doc(result.user.uid).set({
+            displayName: result.user.displayName || 'Parent',
+            email: result.user.email,
+            kids: [],
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (e) {
+        showAuthError(e.message.replace('Firebase: ', '').replace(/\(auth\/.*\)/, ''));
+      }
+    }
+
+    // ── Sign Out ──
+    function handleSignOut() {
+      auth.signOut();
+    }
+
+    // ── Load Dashboard ──
+    async function loadParentDashboard() {
+      const name = currentUser.displayName || 'Parent';
+      document.getElementById('topbar-name').textContent = name;
+      document.getElementById('welcome-heading').textContent = `Welcome, ${name.split(' ')[0]}!`;
+
+      // Load parent doc
+      try {
+        const doc = await db.collection('parents').doc(currentUser.uid).get();
+        if (doc.exists) {
+          parentData = doc.data();
+        } else {
+          // Create parent doc if it doesn't exist
+          parentData = { displayName: name, email: currentUser.email, kids: [] };
+          await db.collection('parents').doc(currentUser.uid).set({
+            ...parentData,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (e) {
+        parentData = { kids: [] };
+        console.log('Firestore read error:', e);
+      }
+
+      renderKidCards();
+      // Check for weekly progress notification
+      setTimeout(() => checkWeeklyProgress(), 2000);
+      // Load friend requests for parent approval
+      setTimeout(() => loadParentFriendRequests(), 1500);
+    }
+
+    // ── Render Kid Cards ──
+    async function renderKidCards() {
+      const container = document.getElementById('kid-cards');
+      const emptyState = document.getElementById('empty-state');
+      const kids = parentData?.kids || [];
+
+      document.getElementById('stat-kids').textContent = kids.length;
+
+      if (kids.length === 0) {
+        emptyState.style.display = 'block';
+        return;
+      }
+      emptyState.style.display = 'none';
+
+      let totalLevels = 0, totalStars = 0;
+      let cardsHtml = '';
+
+      for (const kidUsername of kids) {
+        let kidData = {};
+        try {
+          const kidDoc = await db.collection('kids').doc(kidUsername).get();
+          if (kidDoc.exists) kidData = kidDoc.data();
+        } catch (e) {}
+
+        const displayName = kidData.displayName || kidUsername;
+        const avatar = kidData.avatar || 'hero_aiden_portrait.png';
+        const maxLevel = kidData.maxLevel || 0;
+        const stars = kidData.totalStars || 0;
+        const shards = kidData.totalShards || 0;
+        const lastPlayed = kidData.lastPlayed ? timeAgo(kidData.lastPlayed.toDate()) : 'Never';
+        const currentWorld = kidData.currentWorld || 1;
+
+        totalLevels += maxLevel;
+        totalStars += stars;
+
+        cardsHtml += `
+          <div class="kid-card">
+            <img class="kid-card-avatar" src="https://${kidUsername}.tlid.io/assets/ui/${avatar}" 
+                 onerror="this.src='https://${kidUsername}.tlid.io/assets/ui/hero_aiden_portrait.png'" />
+            <div class="kid-card-info">
+              <div class="kid-card-name">${displayName}</div>
+              <div class="kid-card-username">${kidUsername}.tlid.io</div>
+              <div class="kid-card-stats">
+                <span class="kid-card-stat"><span class="dot" style="background:var(--success);"></span> ${maxLevel} Levels</span>
+                <span class="kid-card-stat"><span class="dot" style="background:var(--warning);"></span> ${stars} ⭐</span>
+                <span class="kid-card-stat"><span class="dot" style="background:var(--purple);"></span> ${shards} 💎</span>
+                <span class="kid-card-stat">${lastPlayed}</span>
+              </div>
+            </div>
+            <div class="kid-card-actions">
+              <button class="kid-action-btn play" onclick="window.open('https://${kidUsername}.tlid.io','_blank')">🎮 Visit</button>
+              <button class="kid-action-btn view" onclick="viewKidDetail('${kidUsername}')">📊 Stats</button>
+            </div>
+          </div>
+        `;
+      }
+
+      container.innerHTML = cardsHtml + '<div id="empty-state" class="empty-state" style="display:none;"></div>';
+      document.getElementById('stat-levels').textContent = totalLevels;
+      document.getElementById('stat-stars').textContent = totalStars;
+    }
+
+    // ── Add Kid Modal ──
+    function openAddKidModal() {
+      document.getElementById('add-kid-modal').classList.add('open');
+      document.getElementById('kid-name').value = '';
+      document.getElementById('kid-username').value = '';
+      document.getElementById('username-status').textContent = '';
+      document.getElementById('username-preview-name').textContent = 'username';
+      document.getElementById('add-kid-btn').disabled = true;
+      document.getElementById('add-kid-error').style.display = 'none';
+    }
+    function closeAddKidModal() {
+      document.getElementById('add-kid-modal').classList.remove('open');
+    }
+
+    // ── Username Generation ──
+    function generateUsername() {
+      const name = document.getElementById('kid-name').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (name.length >= 2) {
+        const suggestions = [name, name + 'star', name + 'hero', name + 'rift'];
+        const suggestion = suggestions[0];
+        document.getElementById('kid-username').value = suggestion;
+        document.getElementById('username-preview-name').textContent = suggestion;
+        checkUsername();
+      }
+    }
+
+    let usernameCheckTimer;
+    async function checkUsername() {
+      const username = document.getElementById('kid-username').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      document.getElementById('kid-username').value = username;
+      document.getElementById('username-preview-name').textContent = username || 'username';
+      
+      const status = document.getElementById('username-status');
+      const btn = document.getElementById('add-kid-btn');
+
+      if (username.length < 3) {
+        status.textContent = 'Username must be at least 3 characters';
+        status.className = 'username-status taken';
+        btn.disabled = true;
+        return;
+      }
+
+      status.textContent = 'Checking...';
+      status.className = 'username-status';
+
+      clearTimeout(usernameCheckTimer);
+      usernameCheckTimer = setTimeout(async () => {
+        try {
+          const doc = await db.collection('kids').doc(username).get();
+          if (doc.exists) {
+            status.textContent = '✗ Username taken';
+            status.className = 'username-status taken';
+            btn.disabled = true;
+          } else {
+            status.textContent = '✓ Available!';
+            status.className = 'username-status available';
+            btn.disabled = false;
+          }
+        } catch (e) {
+          status.textContent = '✓ Available';
+          status.className = 'username-status available';
+          btn.disabled = false;
+        }
+      }, 400);
+    }
+
+    // ── Add Kid ──
+    async function handleAddKid() {
+      const name = document.getElementById('kid-name').value.trim();
+      const username = document.getElementById('kid-username').value.trim().toLowerCase();
+      const errorEl = document.getElementById('add-kid-error');
+
+      if (!name || !username) {
+        errorEl.textContent = 'Please fill in all fields.';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      const btn = document.getElementById('add-kid-btn');
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+
+      try {
+        // Create kid doc
+        await db.collection('kids').doc(username).set({
+          displayName: name,
+          parentId: currentUser.uid,
+          avatar: 'hero_aiden_portrait.png',
+          theme: { accentColor: '#22d3ee' },
+          maxLevel: 0,
+          totalStars: 0,
+          totalShards: 0,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+
+        // Add to parent's kid list
+        await db.collection('parents').doc(currentUser.uid).update({
+          kids: firebase.firestore.FieldValue.arrayUnion(username),
+        });
+
+        // Update local data
+        if (!parentData.kids) parentData.kids = [];
+        parentData.kids.push(username);
+
+        closeAddKidModal();
+        renderKidCards();
+        btn.textContent = 'Create Portal';
+      } catch (e) {
+        errorEl.textContent = 'Error creating profile: ' + e.message;
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Create Portal';
+      }
+    }
+
+    // ── Utility ──
+    function timeAgo(date) {
+      const seconds = Math.floor((new Date() - date) / 1000);
+      if (seconds < 60) return 'Just now';
+      if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+      if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+      return Math.floor(seconds / 86400) + 'd ago';
+    }
+
+    // ── Parent Friend Request Management ──
+    async function loadParentFriendRequests() {
+      const kids = parentData?.kids || [];
+      if (kids.length === 0) return;
+      
+      const container = document.getElementById('parent-friend-requests');
+      const section = document.getElementById('friends-management');
+      let allRequests = [];
+      
+      for (const username of kids) {
+        try {
+          const doc = await db.collection('kids').doc(username).get();
+          if (!doc.exists) continue;
+          const data = doc.data();
+          const requests = data.friendRequests || [];
+          const friends = data.friends || [];
+          
+          requests.forEach(r => allRequests.push({ kid: username, from: r }));
+          
+          // Also show current friends
+          if (friends.length > 0) {
+            allRequests.push({ kid: username, friends: friends });
+          }
+        } catch(e) {}
+      }
+      
+      if (allRequests.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+      
+      section.style.display = 'block';
+      let html = '';
+      
+      // Pending requests
+      const pending = allRequests.filter(r => r.from);
+      if (pending.length > 0) {
+        pending.forEach(req => {
+          html += `
+            <div style="background:var(--bg-card); border:1px solid rgba(244,63,94,0.2); border-radius:var(--radius-sm); padding:14px; display:flex; align-items:center; gap:12px;">
+              <div style="flex:1;">
+                <div style="font-size:14px; font-weight:800; color:var(--text-bright);">${req.from} → ${req.kid}</div>
+                <div style="font-size:12px; color:var(--text-dim); font-weight:600;">wants to be friends with ${req.kid}</div>
+              </div>
+              <button onclick="parentApproveFriend('${req.kid}','${req.from}')" style="background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); border-radius:8px; padding:8px 14px; color:var(--success); font-size:12px; font-weight:800; cursor:pointer;">✓ Approve</button>
+              <button onclick="parentDenyFriend('${req.kid}','${req.from}')" style="background:rgba(244,63,94,0.1); border:1px solid rgba(244,63,94,0.2); border-radius:8px; padding:8px 14px; color:var(--danger); font-size:12px; font-weight:800; cursor:pointer;">✗ Deny</button>
+            </div>
+          `;
+        });
+      }
+      
+      // Current friends summary
+      const friendSummaries = allRequests.filter(r => r.friends);
+      if (friendSummaries.length > 0) {
+        friendSummaries.forEach(item => {
+          html += `
+            <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px;">
+              <div style="font-size:13px; font-weight:700; color:var(--text-dim); margin-bottom:6px;">${item.kid}'s friends:</div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${item.friends.map(f => `<span style="background:var(--accent-solid); border-radius:20px; padding:4px 12px; font-size:12px; font-weight:700; color:var(--accent);">${f}</span>`).join('')}
+              </div>
+            </div>
+          `;
+        });
+      }
+      
+      container.innerHTML = html;
+    }
+
+    async function parentApproveFriend(kidUsername, friendUsername) {
+      const FV = firebase.firestore.FieldValue;
+      try {
+        await db.collection('kids').doc(kidUsername).set({
+          friends: FV.arrayUnion(friendUsername),
+          friendRequests: FV.arrayRemove(friendUsername),
+        }, { merge: true });
+        await db.collection('kids').doc(friendUsername).set({
+          friends: FV.arrayUnion(kidUsername),
+        }, { merge: true });
+        loadParentFriendRequests();
+      } catch(e) { alert('Error approving friend: ' + e.message); }
+    }
+
+    async function parentDenyFriend(kidUsername, friendUsername) {
+      try {
+        await db.collection('kids').doc(kidUsername).set({
+          friendRequests: firebase.firestore.FieldValue.arrayRemove(friendUsername),
+        }, { merge: true });
+        loadParentFriendRequests();
+      } catch(e) { alert('Error denying friend: ' + e.message); }
+    }
+
+    // Enter key support
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        if (document.getElementById('login-form').style.display !== 'none') {
+          handleLogin();
+        } else {
+          handleSignup();
+        }
+      }
+    });
